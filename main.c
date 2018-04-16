@@ -28,232 +28,86 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-// constants
-#define NORMAL 0
-#define URGENT 1
-#define BUFFER_SIZE 16
-#define LOOP_TIMES 100
+sem_t *mutual_exclusion_reader, *mutual_exclusion_writer, *reader_priority;
+int nr = 0;
 
-// struct
-typedef struct Data {
-    int buf;
-    long long ms;
-} Data;
+static void *writer(void *a){
+    int *i = (int *) a;
 
-typedef struct Buffer {
-    sem_t *empty;
-    sem_t *full;
-    sem_t *mutual_exclusion_producer;
-    sem_t *mutual_exclusion_consumer;
-    int in;
-    int out;
-    Data *data;
-    int size;
-} Buffer;
+    sleep(rand()%2);
+    printf("Writer %d trying to write\n", *i);
 
-// global variables
-Buffer *normal_buf;
-Buffer *urgent_buf;
-float probability;
+    sem_wait(mutual_exclusion_writer);
+    sem_wait(reader_priority);
 
-// prototypes
-long long current_timestamp();
-void buffer_init(int size);
-void *consumer(void);
-void *producer(void);
-int getRandomNumber(unsigned int seed, int min, int max);
-int millisleep(long milliseconds);
-void nano_sleep(long  ns);
-void putOnBuffer(Data data, Buffer *b);
-Data getFromBuffer();
+    printf("Thread n. %d writing\n", *i);
+    sleep(3);
 
-// main
-int main(int argc, char **argv) {
-    printf(" > Main started!\n");
+    sem_post(reader_priority);
+    sem_post(mutual_exclusion_writer);
 
-    if (argc != 2) {
-        fprintf(stdout, "Expected 2 argument: <prog_name> <p>\n");
-        exit(-1);
-    }
-
-    probability = (float) atof(argv[1]);
-    printf(" > Probability: %f!\n", probability);
-
-    // variables
-    pthread_t th_producer, th_consumer;
-    void *retval;
-
-    buffer_init(BUFFER_SIZE);
-    printf(" > Buffers created!\n");
-
-    // create threads
-    pthread_create(&th_consumer, NULL, (void *(*)(void *)) consumer, 0);
-    pthread_create(&th_producer, NULL, (void *(*)(void *)) producer, 0);
-    printf(" > Thread created!\n");
-
-    // wait until producer and consumer end
-    printf(" > Waiting for thread termination...\n");
-    pthread_join(th_consumer, &retval);
-    pthread_join(th_producer, &retval);
-    printf(" > Threads terminated! ---> Terminating main...\n");
-
-    return 0;
-}
-
-// threads
-void *consumer(void) {
-    // loops 100 times
-    for (int i = 0; i<LOOP_TIMES; i++) {
-        millisleep(10);
-
-        // get data from buffer
-        Data data = getFromBuffer();
-
-        // print information
-        if (data.buf == URGENT) {
-            printf(" >>> Consumer: ms is %lli and buffer is URGENT!\n", data.ms);
-        } else {
-            printf(" >>> Consumer: ms is %lli and buffer is NORMAL!\n", data.ms);
-        }
-
-    }
     return NULL;
 }
 
-void *producer(void) {
-    // loops 100 times
-    for (int i = 0; i<LOOP_TIMES; i++) {
-        // sleeps between 1 and 10 ms
-        long rand = getRandomNumber((unsigned int) time(NULL), 1, 10);
-        millisleep(rand);
+static void *reader(void *a){
+    int *i = (int *) a;
 
-        // get current time in ms
-        long long ms = current_timestamp();
+    sleep(rand()%10);
+    printf("Reader %d trying to read\n", *i);
 
-        // randomly selects normal or urgent buffer
-        int int_probability = (int) (probability * 10);
-        //printf(" >> Producer: int_probability is %i!\n", int_probability);
-
-        int rand_n = getRandomNumber((unsigned int) time(NULL), 1, 10);
-        //printf(" >> Producer: rand_n is %i!\n", rand_n);
-
-        Buffer *b;
-        int buf;
-        if (rand_n < int_probability) {
-            b = normal_buf;
-            buf = NORMAL;
-        } else {
-            b = urgent_buf;
-            buf = URGENT;
-        }
-
-        Data d;
-
-        // print data
-        if (buf == URGENT) {
-            printf(" >> Producer: ms is %lli and buffer is URGENT!\n", ms);
-            d.buf = URGENT;
-        } else {
-            printf(" >> Producer: ms is %lli and buffer is NORMAL!\n", ms);
-            d.buf = NORMAL;
-        }
-        d.ms = ms;
-
-        // put data inside buffer
-        putOnBuffer(d, b);
+    sem_wait(mutual_exclusion_reader);
+    // new reader
+    nr++;
+    if (nr == 1){
+        // if there is at least a reader, block writers
+        sem_wait(reader_priority);
     }
+    sem_post(mutual_exclusion_reader);
+
+    printf("Thread n. %d reading\n", *i);
+    sleep(1);
+
+    sem_wait(mutual_exclusion_reader);
+    // reader finishes
+    nr--;
+
+    if(nr == 0) {
+        // if there is no more readers free writer access
+        sem_post (reader_priority);
+    }
+    sem_post (mutual_exclusion_reader);
+
     return NULL;
 }
 
-// functions
-long long current_timestamp() {
-    struct timeval te;
+int main(void){
+    pthread_t th_a, th_b;
+    int i, *v;
 
-    // get current time
-    gettimeofday(&te, NULL);
+    // allocate and init semaphores
+    reader_priority = (sem_t *) malloc (sizeof (sem_t));
+    mutual_exclusion_reader = (sem_t *) malloc (sizeof (sem_t));
+    mutual_exclusion_writer = (sem_t *) malloc (sizeof (sem_t));
+    sem_init(reader_priority, 0, 1);
+    sem_init(mutual_exclusion_reader, 0, 1);
+    sem_init(mutual_exclusion_writer, 0, 1);
 
-    long long milliseconds = te.tv_sec*1000LL + te.tv_usec/1000;
+    setbuf(stdout,0);
 
-    return milliseconds;
-}
-
-void buffer_init(int size) {
-    // allocate a new urgent_buffer
-    urgent_buf = (Buffer *)malloc(sizeof(Buffer));
-
-    // initialization
-    urgent_buf->size = size;
-    urgent_buf->data = (Data *)malloc(urgent_buf->size * sizeof(Data));
-    urgent_buf->in = 0;
-    urgent_buf->out = 0;
-
-    // semaphores allocation
-    urgent_buf->empty = (sem_t *)malloc(sizeof(sem_t));
-    urgent_buf->full = (sem_t *)malloc(sizeof(sem_t));
-    urgent_buf->mutual_exclusion_consumer = (sem_t *)malloc(sizeof(sem_t));
-    urgent_buf->mutual_exclusion_producer = (sem_t *)malloc(sizeof(sem_t));
-
-    // semaphores initalization
-    sem_init(urgent_buf->empty, 0, (unsigned int) urgent_buf->size);
-    sem_init(urgent_buf->full, 0, 0);
-    sem_init(urgent_buf->mutual_exclusion_consumer, 0, 1);
-    sem_init(urgent_buf->mutual_exclusion_producer, 0, 1);
-
-    // allocate a new normal_buffer
-    normal_buf = (Buffer *)malloc(sizeof(Buffer));
-
-    // initialization
-    normal_buf->size = size;
-    normal_buf->data = (Data *)malloc(urgent_buf->size * sizeof(Data));
-    normal_buf->in = 0;
-    normal_buf->out = 0;
-
-    // semaphores allocation
-    normal_buf->empty = (sem_t *)malloc(sizeof(sem_t));
-    normal_buf->full = (sem_t *)malloc(sizeof(sem_t));
-    normal_buf->mutual_exclusion_consumer = (sem_t *)malloc(sizeof(sem_t));
-    normal_buf->mutual_exclusion_producer = (sem_t *)malloc(sizeof(sem_t));
-
-    // semaphores initalization
-    sem_init(normal_buf->empty, 0, (unsigned int) normal_buf->size);
-    sem_init(normal_buf->full, 0, 0);
-    sem_init(normal_buf->mutual_exclusion_consumer, 0, 1);
-    sem_init(normal_buf->mutual_exclusion_producer, 0, 1);
-}
-
-void putOnBuffer(Data data, Buffer *b) {
-    sem_wait(b->empty);
-    b->data[b->in] = data;
-    // increment counter of data inside buffer
-    b->in = (b->in + 1) % b->size;
-    sem_post(b->full);
-}
-
-Data getFromBuffer() {
-    Data data;
-    int result, value;
-    Buffer *b;
-
-    // select buffer with priority
-    if ((result = sem_getvalue(urgent_buf->full, &value) == -1)) {
-        fprintf(stdout, "Error retrieving sem value\n");
-        exit(-1);
+    // Create the threads
+    for (i = 0; i<10; i++) {
+        v = (int *) malloc (sizeof (int));
+        *v = i;
+        pthread_create(&th_a, NULL, reader, v);
     }
 
-    if (value > 0) {
-        b = urgent_buf;
-    } else {
-        b = normal_buf;
+    for (i = 0; i < 10; i++) {
+        v = (int *) malloc (sizeof (int));
+        *v = i;
+        pthread_create(&th_b, NULL, writer, v);
     }
 
-    sem_wait(b->full);
-    data.buf = b->data[b->out].buf;
-    data.ms = b->data[b->out].ms;
-    // decrement counter of data inside buffer
-    b->out = (b->out + 1) % b->size;
-    sem_post(b->empty);
-
-    return data;
+    pthread_exit(0);
 }
 
 int getRandomNumber(unsigned int seed, int min, int max) {
