@@ -28,86 +28,128 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-sem_t *mutual_exclusion_reader, *mutual_exclusion_writer, *reader_priority;
-int nr = 0;
+pthread_mutex_t mutex;
+pthread_cond_t turn;
+int writing;
+int reading;
+int writers;
 
-static void *writer(void *a){
-    int *i = (int *) a;
+void init(void);
+static void *writer(void);
+static void *reader(void);
+int getRandomNumber(unsigned int seed, int min, int max) ;
+int millisleep(long milliseconds) ;
 
-    sleep(rand()%2);
-    printf("Writer %d trying to write\n", *i);
+long long current_timestamp() ;
 
-    sem_wait(mutual_exclusion_writer);
-    sem_wait(reader_priority);
+// main
+int main(int argc, char **argv) {
+    pthread_t *th_readers, *th_writers;
+    int n;
 
-    printf("Thread n. %d writing\n", *i);
-    sleep(3);
+    printf(" > Main started!\n");
 
-    sem_post(reader_priority);
-    sem_post(mutual_exclusion_writer);
+    if (argc != 2) {
+        fprintf(stdout, "Expected 2 argument: <prog_name> <n>\n");
+        exit(-1);
+    }
 
-    return NULL;
+    n = atoi(argv[1]);
+    printf(" > N is %d!\n", n);
+
+    th_readers = (pthread_t *)malloc(n*sizeof(pthread_t));
+    th_writers = (pthread_t *)malloc(n*sizeof(pthread_t));
+
+    // allocate and init condition and mutex
+    init();
+
+    setbuf(stdout, 0);
+
+    // Create n readers
+    for (int i = 0; i < n; i++) {
+        pthread_create(&th_readers[i], NULL, (void *(*)(void *)) reader, NULL);
+    }
+
+    // Create n writers
+    for (int i = 0; i < n; i++) {
+        pthread_create(&th_writers[i], NULL, (void *(*)(void *)) writer, NULL);
+    }
+
+    // wait n readers
+    for (int i = 0; i < n; i++) {
+        printf(" > A reader is terminated!\n");
+        pthread_join(th_writers[i], NULL);
+    }
+
+    // wait n writers
+    for (int i = 0; i < n; i++) {
+        printf(" > A writer is terminated!\n");
+        pthread_join(th_readers[i], NULL);
+    }
+
+    printf(" > Main exiting...\n");
+    pthread_exit(0);
 }
 
-static void *reader(void *a){
-    int *i = (int *) a;
+// functions
+static void *writer(void){
+    int rand_time = getRandomNumber((unsigned int) time(NULL), 0, 500);
+    millisleep(rand_time);
+    printf(" >> Thread %d trying to write at time %lli\n", (int) pthread_self(), current_timestamp());
 
-    sleep(rand()%10);
-    printf("Reader %d trying to read\n", *i);
-
-    sem_wait(mutual_exclusion_reader);
-    // new reader
-    nr++;
-    if (nr == 1){
-        // if there is at least a reader, block writers
-        sem_wait(reader_priority);
+    pthread_mutex_lock(&mutex);
+    writers++;
+    while (reading || writing) {
+        pthread_cond_wait(&turn, &mutex);
     }
-    sem_post(mutual_exclusion_reader);
+    pthread_mutex_unlock(&mutex);
 
-    printf("Thread n. %d reading\n", *i);
-    sleep(1);
+    /* WRITE */
+    printf(" >> Thread %d writing at time %lli\n", (int) pthread_self(), current_timestamp());
+    millisleep(500);
 
-    sem_wait(mutual_exclusion_reader);
-    // reader finishes
-    nr--;
-
-    if(nr == 0) {
-        // if there is no more readers free writer access
-        sem_post (reader_priority);
-    }
-    sem_post (mutual_exclusion_reader);
-
-    return NULL;
-}
-
-int main(void){
-    pthread_t th_a, th_b;
-    int i, *v;
-
-    // allocate and init semaphores
-    reader_priority = (sem_t *) malloc (sizeof (sem_t));
-    mutual_exclusion_reader = (sem_t *) malloc (sizeof (sem_t));
-    mutual_exclusion_writer = (sem_t *) malloc (sizeof (sem_t));
-    sem_init(reader_priority, 0, 1);
-    sem_init(mutual_exclusion_reader, 0, 1);
-    sem_init(mutual_exclusion_writer, 0, 1);
-
-    setbuf(stdout,0);
-
-    // Create the threads
-    for (i = 0; i<10; i++) {
-        v = (int *) malloc (sizeof (int));
-        *v = i;
-        pthread_create(&th_a, NULL, reader, v);
-    }
-
-    for (i = 0; i < 10; i++) {
-        v = (int *) malloc (sizeof (int));
-        *v = i;
-        pthread_create(&th_b, NULL, writer, v);
-    }
+    pthread_mutex_lock(&mutex);
+    writing--;
+    writers--;
+    pthread_cond_broadcast(&turn);
+    pthread_mutex_unlock(&mutex);
 
     pthread_exit(0);
+}
+
+static void *reader(void){
+    int rand_time = getRandomNumber((unsigned int) time(NULL), 0, 500);
+    millisleep(rand_time);
+    printf(" >>> Thread %d trying to read at time %lli\n", (int) pthread_self(), current_timestamp());
+
+    pthread_mutex_lock(&mutex);
+    if (writers) {
+        pthread_cond_wait(&turn, &mutex);
+    }
+    while (writing) {
+        pthread_cond_wait(&turn, &mutex);
+    }
+    reading++;
+    pthread_mutex_unlock(&mutex);
+
+    /* READ */
+    printf(" >>> Thread %d reading at time %lli\n", (int) pthread_self(), current_timestamp());
+    millisleep(500);
+
+    pthread_mutex_lock(&mutex);
+    reading--;
+    pthread_cond_broadcast(&turn);
+    pthread_mutex_unlock(&mutex);
+
+    pthread_exit(0);
+}
+
+void init(void) {
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&turn, NULL);
+    reading = 0;
+    writing = 0;
+    writers = 0;
 }
 
 int getRandomNumber(unsigned int seed, int min, int max) {
@@ -139,4 +181,15 @@ int millisleep(long milliseconds) {
     }
 
     return nanosleep(&req , &rem);
+}
+
+long long current_timestamp() {
+    struct timeval te;
+
+    // get current time
+    gettimeofday(&te, NULL);
+
+    long long milliseconds = te.tv_sec*1000LL + te.tv_usec/1000;
+
+    return milliseconds;
 }
